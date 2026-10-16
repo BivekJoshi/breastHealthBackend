@@ -53,12 +53,12 @@ jobs:
     steps:
       # fetch-depth 2 so the dependency check below can diff against the parent.
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: ${{ vars.NODE_VERSION || '22' }}
           cache: npm
