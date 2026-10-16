@@ -60,7 +60,14 @@ cPanel → *Setup Node.js App* → **Create Application**
 | Application startup file | `app.js` |
 
 ### 4. `.env` on the server
-File Manager → `breastscan_backend/.env` (use `.env.example` as the reference):
+Preferred: store the whole file as the GitHub secret **`ENV_FILE`** (step 5).
+Every deploy then writes it to `breastscan_backend/.env` (mode 600), after
+checking it has `NODE_ENV`, `DB_NAME`, `DB_USER`, `DB_PWD` and `JWT_SECRET`. To
+change a setting, edit the secret and re-run the deploy.
+
+Without that secret, the deploy leaves the server's file alone and you maintain
+it by hand: File Manager → `breastscan_backend/.env` (use `.env.example` as the
+reference). Either way, it looks like this:
 
 ```
 NODE_ENV=production
@@ -92,7 +99,8 @@ WELL_KNOWN_DIR=/home/evolveph/api.breastscan.health/.well-known
 ### 5. GitHub secrets
 Repo → *Settings* → *Secrets and variables* → *Actions* → **Secrets** — the same
 four values the `evolve-pharma-backend` repo uses:
-`SERVER_HOST`, `SERVER_PORT`, `SERVER_USER`, `SERVER_SSH_KEY`.
+`SERVER_HOST`, `SERVER_PORT`, `SERVER_USER`, `SERVER_SSH_KEY` — plus
+`ENV_FILE`, the production `.env` from step 4.
 
 ### 6. First deploy
 Push to `PRODUCTION`, then **Run NPM Install** and **Restart** in cPanel, then

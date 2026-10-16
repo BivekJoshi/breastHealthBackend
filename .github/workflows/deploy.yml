@@ -20,6 +20,11 @@ name: Backend Production Deployment
 #   SERVER_USER     evolveph
 #   SERVER_SSH_KEY  the private key whose public half is authorized in
 #                   cPanel -> SSH Access (github-deploy-evolve-backend)
+# and, optionally:
+#   ENV_FILE        the whole production .env. When set, every deploy writes it
+#                   to breastscan_backend/.env, so the server's settings live in
+#                   one place you can replace. When unset, the server's .env is
+#                   left exactly as it is.
 
 on:
   push:
@@ -106,11 +111,29 @@ jobs:
       - name: Upload code
         env:
           TARGET: ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}
+          # Through env, not ${{ }} in the script, so quotes and # in the
+          # values cannot break or inject into the shell.
+          ENV_FILE: ${{ secrets.ENV_FILE }}
         run: |
           set -euo pipefail
 
           # An empty src/ would make the diff below look like "delete everything".
           test -d src && test -n "$(ls -A src)" || { echo "src/ is missing or empty — refusing to deploy"; exit 1; }
+
+          # A pasted .env that lost its database line would take the API down
+          # just as surely as a missing one, so check it before shipping it.
+          if [ -n "$ENV_FILE" ]; then
+            printf '%s\n' "$ENV_FILE" | tr -d '\r' > production.env
+            for key in NODE_ENV DB_NAME DB_USER DB_PWD JWT_SECRET; do
+              grep -q "^${key}=." production.env || { echo "::error::ENV_FILE has no ${key}= line — refusing to deploy"; exit 1; }
+            done
+            if grep -q 'PASTE_THE_DATABASE_PASSWORD_HERE' production.env; then
+              echo "::error::ENV_FILE still has the DB_PWD placeholder — paste the real password"; exit 1
+            fi
+            echo "ENV_FILE secret present: it will replace the server's .env"
+          else
+            echo "No ENV_FILE secret: the server's .env is left untouched"
+          fi
 
           SFTP_OPTS="-P ${{ secrets.SERVER_PORT }} -i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=no -o BatchMode=yes -o IdentitiesOnly=yes"
 
@@ -142,6 +165,10 @@ jobs:
               [ -n "$f" ] && echo "-rm $f"
             done < removed.txt
             echo "put manifest.new .deploy-manifest"
+            if [ -s production.env ]; then
+              echo "put production.env .env"
+              echo "chmod 600 .env"
+            fi
           } > upload.batch
 
           sftp -b upload.batch $SFTP_OPTS "$TARGET"
