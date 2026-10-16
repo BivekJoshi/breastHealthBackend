@@ -2,7 +2,7 @@ const express = require("express");
 const cors = require("cors");
 require("colors");
 
-const { PORT, CLIENT_URL, ENVIRONMENT, JWT } = require("./config/config");
+const { PORT, CLIENT_URL, ENVIRONMENT, JWT, ENV_FILE, ENV_FILE_FOUND } = require("./config/config");
 const { connectDB } = require("./config/db");
 const { syncDatabase } = require("./models");
 const { runSeeds } = require("./seed");
@@ -102,6 +102,7 @@ const warmUp = async (attempt = 1) => {
 
 app.listen(PORT, () => {
   console.log(`Server started on PORT ${PORT} [${ENVIRONMENT}]`.yellow.bold);
+  console.log(ENV_FILE_FOUND ? `Settings loaded from ${ENV_FILE}` : `No .env at ${ENV_FILE}`.red.bold);
 
   if (ENVIRONMENT === "prod" && JWT.IS_DEFAULT) {
     console.error(

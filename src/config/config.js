@@ -1,6 +1,14 @@
+const path = require("path");
 const dotenv = require("dotenv");
 
-dotenv.config();
+/**
+ * The app root's .env, found from this file rather than the working directory,
+ * which Passenger does not promise to be the app root. `override` lets the file
+ * win over variables set in cPanel's Node.js App screen, so a setting that
+ * seems ignored only ever has one place to look.
+ */
+const ENV_FILE = path.resolve(__dirname, "../../.env");
+const ENV_FILE_FOUND = !dotenv.config({ path: ENV_FILE, override: true }).error;
 
 const ENVIRONMENT = process.env.NODE_ENV === "production" ? "prod" : "dev";
 
@@ -44,6 +52,8 @@ const PORT = Number(process.env.PORT || 4000);
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:3000";
 
 module.exports = {
+  ENV_FILE,
+  ENV_FILE_FOUND,
   ENVIRONMENT,
   DB,
   JWT,

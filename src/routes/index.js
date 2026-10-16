@@ -5,6 +5,7 @@ const publicRoutes = require("./public.routes");
 const adminRoutes = require("./admin.routes");
 
 const { getState } = require("../utils/readiness");
+const { ENV_FILE_FOUND } = require("../config/config");
 
 const router = Router();
 
@@ -22,6 +23,8 @@ router.get("/health", (_req, res) => {
     status: ready ? "ok" : phase,
     uptime: process.uptime(),
     ...(error ? { error } : {}),
+    /* The usual reason a fresh deploy cannot reach the database. */
+    ...(phase === "failed" && !ENV_FILE_FOUND ? { hint: "No .env file in the app root." } : {}),
   });
 });
 
