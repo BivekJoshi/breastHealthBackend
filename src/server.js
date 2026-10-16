@@ -16,6 +16,15 @@ const app = express();
 /* Behind cPanel/Passenger and most proxies, so trust the forwarded headers. */
 app.set("trust proxy", 1);
 
+/* AutoSSL proves the domain is ours by dropping a file under the document
+   root's .well-known/ and fetching it over HTTP. Passenger hands every path on
+   the API's domain to this app, so without this the check reaches Express,
+   gets a 404, and the certificate is never issued or renewed. Set
+   WELL_KNOWN_DIR to that folder, e.g. /home/<account>/api.breastscan.health/.well-known */
+if (process.env.WELL_KNOWN_DIR) {
+  app.use("/.well-known", express.static(process.env.WELL_KNOWN_DIR, { dotfiles: "allow", index: false }));
+}
+
 /* ------------------ Middleware ------------------ */
 /* A long bilingual news post outgrows the default — Devanagari is 3 bytes a
    character. Parsed here first, the global parser below then leaves it alone. */

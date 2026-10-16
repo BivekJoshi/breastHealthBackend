@@ -1,0 +1,202 @@
+name: Backend Production Deployment
+
+# Push to PRODUCTION -> verify -> upload over SFTP -> reload Passenger -> smoke test.
+#
+# Same pipeline as the Evolve Pharma backend, on the same cPanel account
+# (evolveph). The API runs as its own Node.js app at api.breastscan.health; the
+# website (breastscan.health) is static files deployed by the frontend repo.
+#
+#   1. Shell access is DISABLED on this cPanel account, so the deploy cannot run
+#      `npm install` on the server. Dependencies are installed by hand from the
+#      cPanel UI. The "Dependency change check" step below tells you when that
+#      is required — ignoring it is the one way to break a deploy.
+#   2. Passenger only picks up new code when tmp/restart.txt changes, so the
+#      upload is followed by an explicit reload and a health check.
+#
+# Repo -> Settings -> Secrets and variables -> Actions -> Secrets
+# (the same four values as the evolve-pharma-backend repo):
+#   SERVER_HOST     the server's address
+#   SERVER_PORT     its SSH/SFTP port
+#   SERVER_USER     evolveph
+#   SERVER_SSH_KEY  the private key whose public half is authorized in
+#                   cPanel -> SSH Access (github-deploy-evolve-backend)
+
+on:
+  push:
+    branches:
+      - PRODUCTION
+  # Lets you redeploy the current PRODUCTION commit from the Actions tab,
+  # which is how you recover after running npm install in cPanel.
+  workflow_dispatch:
+
+# Two deploys overlapping would interleave file uploads into a live app root.
+# Queue them instead; never cancel one midway through an upload.
+concurrency:
+  group: breastscan-backend-production
+  cancel-in-progress: false
+
+env:
+  # Path is relative to the SSH user's home (/home/evolveph). Not a secret.
+  REMOTE_DIR: breastscan_backend
+  HEALTH_URL: https://api.breastscan.health/api/health
+
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      # fetch-depth 2 so the dependency check below can diff against the parent.
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ vars.NODE_VERSION || '22' }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Parse everything before uploading any of it. A syntax error that reaches
+      # the server survives until the next deploy, because Passenger keeps
+      # restart-looping on a file it cannot parse.
+      - name: Syntax check
+        run: find app.js src -name '*.js' -print0 | xargs -0 -n1 node --check
+
+      # No shell on the server means no automated `npm install`. Surface it
+      # loudly instead of letting the app boot against stale node_modules.
+      - name: Dependency change check
+        run: |
+          if ! git rev-parse -q --verify HEAD^ >/dev/null || git diff --name-only HEAD^ HEAD | grep -qE '^package(-lock)?\.json$'; then
+            {
+              echo "## Dependencies changed — manual step required"
+              echo ""
+              echo "\`package.json\` or \`package-lock.json\` changed in this push (or this is the first one)."
+              echo "The server's \`node_modules\` may be stale or missing."
+              echo ""
+              echo "1. cPanel -> **Setup Node.js App** -> the \`${{ env.REMOTE_DIR }}\` app"
+              echo "2. Click **Run NPM Install**, wait for it to finish"
+              echo "3. Click **Restart**"
+              echo ""
+              echo "Until you do, the API may fail to boot."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Run NPM Install in cPanel::Dependencies changed; the server needs a manual npm install."
+          else
+            echo "No dependency changes — node_modules on the server is still valid."
+          fi
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p "${{ secrets.SERVER_PORT }}" "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      # Plain sftp only ever adds and overwrites, so on its own a file deleted
+      # from the repo would linger on the server forever. The manifest closes
+      # that gap: each deploy records the file list it shipped, and the next one
+      # diffs against it to find what to delete. Only src/ is tracked —
+      # node_modules/ and .env live in the app root, are not in the repo, and
+      # must never be considered "removed". News photos are in MySQL, not on
+      # disk, so a deploy cannot touch them.
+      - name: Upload code
+        env:
+          TARGET: ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}
+        run: |
+          set -euo pipefail
+
+          # An empty src/ would make the diff below look like "delete everything".
+          test -d src && test -n "$(ls -A src)" || { echo "src/ is missing or empty — refusing to deploy"; exit 1; }
+
+          SFTP_OPTS="-P ${{ secrets.SERVER_PORT }} -i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=no -o BatchMode=yes -o IdentitiesOnly=yes"
+
+          find src -type f | LC_ALL=C sort > manifest.new
+          echo "shipping $(wc -l < manifest.new) files under src/"
+
+          # Absent on the first deploy, which correctly means "nothing to remove".
+          sftp $SFTP_OPTS "$TARGET" > /dev/null 2>&1 <<GETEOF || true
+          get ${{ env.REMOTE_DIR }}/.deploy-manifest manifest.old
+          GETEOF
+          touch manifest.old
+
+          LC_ALL=C comm -23 manifest.old manifest.new > removed.txt || true
+          if [ -s removed.txt ]; then
+            echo "removing $(wc -l < removed.txt) file(s) deleted from the repo:"
+            cat removed.txt
+          fi
+
+          {
+            echo "cd ${{ env.REMOTE_DIR }}"
+            echo "put app.js"
+            echo "put package.json"
+            echo "put package-lock.json"
+            # put -r needs the top folder to exist; '-' ignores "already exists".
+            echo "-mkdir src"
+            echo "put -r src"
+            # '-' prefix: a file already gone must not abort the whole batch.
+            while IFS= read -r f; do
+              [ -n "$f" ] && echo "-rm $f"
+            done < removed.txt
+            echo "put manifest.new .deploy-manifest"
+          } > upload.batch
+
+          sftp -b upload.batch $SFTP_OPTS "$TARGET"
+
+      # Passenger reloads when tmp/restart.txt changes. Its contents are ignored
+      # by Passenger, but recording the commit shows what is actually running.
+      - name: Reload Passenger
+        env:
+          TARGET: ${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}
+        run: |
+          set -euo pipefail
+          echo "deployed ${GITHUB_SHA} from ${GITHUB_REF_NAME}" > restart.stamp
+          SFTP_OPTS="-P ${{ secrets.SERVER_PORT }} -i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=no -o BatchMode=yes -o IdentitiesOnly=yes"
+          sftp -b - $SFTP_OPTS "$TARGET" <<RESTARTEOF
+          cd ${{ env.REMOTE_DIR }}
+          -mkdir tmp
+          put restart.stamp tmp/restart.txt
+          RESTARTEOF
+
+      # Passenger boots lazily on the next request, and the first one has to
+      # connect to MySQL, create any new tables and seed the admin, so allow a
+      # generous window.
+      - name: Smoke test
+        run: |
+          set -uo pipefail
+          for attempt in $(seq 1 15); do
+            code=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 25 "${{ env.HEALTH_URL }}" || echo 000)
+            if [ "$code" = "200" ] && grep -q '"status":"ok"' /tmp/health.json; then
+              echo "Healthy after ${attempt} attempt(s):"
+              cat /tmp/health.json
+              exit 0
+            fi
+            # The body separates the two very different failures: JSON means the
+            # app is up and telling us why it is not ready; HTML means it never
+            # started and this is the web server's own error page.
+            echo "attempt ${attempt}: HTTP ${code} — $(head -c 200 /tmp/health.json 2>/dev/null | tr -d '\n')"
+            sleep 6
+          done
+
+          echo "::error title=Deploy unhealthy::${{ env.HEALTH_URL }} did not return status ok."
+          echo "Last response body:"
+          cat /tmp/health.json || true
+          {
+            echo "## Smoke test failed"
+            echo ""
+            echo "The files uploaded, but \`${{ env.HEALTH_URL }}\` is not healthy."
+            echo ""
+            echo "Read the body above first:"
+            echo "- **JSON** (\`\"status\":\"failed\"\`) — the app is running; the \`error\` field is the real cause,"
+            echo "  almost always the DB credentials in \`.env\` (wrap DB_PWD in double quotes if it contains #)."
+            echo "- **HTML** — the process never started. Check cPanel -> Setup Node.js App -> the app's log."
+            echo ""
+            echo "Usual causes of a process that never starts:"
+            echo "- dependencies changed and **Run NPM Install** has not been clicked"
+            echo "- \`.env\` on the server is missing entirely"
+            echo "- the app's **application root** is not \`${{ env.REMOTE_DIR }}\`, or its **startup file** is not \`app.js\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
