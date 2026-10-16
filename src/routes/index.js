@@ -5,7 +5,7 @@ const publicRoutes = require("./public.routes");
 const adminRoutes = require("./admin.routes");
 
 const { getState } = require("../utils/readiness");
-const { ENV_FILE_FOUND } = require("../config/config");
+const { ENV_FILE_FOUND, DB } = require("../config/config");
 
 const router = Router();
 
@@ -25,6 +25,9 @@ router.get("/health", (_req, res) => {
     ...(error ? { error } : {}),
     /* The usual reason a fresh deploy cannot reach the database. */
     ...(phase === "failed" && !ENV_FILE_FOUND ? { hint: "No .env file in the app root." } : {}),
+    /* Which DB password the app is holding, without revealing it — tells a
+       stale .env apart from a password that was never set in cPanel. */
+    ...(phase === "failed" ? { dbPasswordLength: DB.PWD.length } : {}),
   });
 });
 
